@@ -22,7 +22,7 @@ Built for large folders of short recordings (thousands of clips under 30 seconds
 ## Quick start
 
 ```bash
-git clone https://github.com/<your-username>/whisper-batch-transcribe.git
+git clone https://github.com/george-dina/whisper-batch-transcribe.git
 cd whisper-batch-transcribe
 ./scripts/setup.sh
 source .venv/bin/activate
