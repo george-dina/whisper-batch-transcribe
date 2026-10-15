@@ -7,6 +7,7 @@ Built for large folders of short recordings (thousands of clips under 30 seconds
 ## Features
 
 - **One command, one CSV:** every file becomes a row with its path, duration and transcript.
+- **Batched GPU decoding:** short clips are transcribed several at a time, which is much faster for datasets of many small files.
 - **Resumable:** stop it any time (Ctrl+C, reboot, crash) and run it again; finished files are skipped.
 - **Fault tolerant:** a broken file is reported and skipped, not fatal.
 - **Local and private:** audio never leaves your machine, and there are no API costs.
@@ -58,8 +59,10 @@ python transcribe.py INPUT [options]
 | `-m, --model` | `large-v3` | Any faster-whisper model, e.g. `large-v3-turbo`, `medium`, or a local path |
 | `--device` | `auto` | `auto`, `cuda` or `cpu` |
 | `--compute-type` | `float16` on GPU, `int8` on CPU | Use `int8_float16` on GPUs with 6 GB of VRAM or less |
+| `-b, --batch-size` | `8` on GPU, `1` on CPU | Clips decoded at once. Try `16` on 8 GB GPUs; `1` disables batching |
 | `--beam-size` | `5` | `1` is faster, `5` is more accurate |
 | `--no-vad` | off | Disable the voice activity filter |
+| `--workers` | `4` | Threads that decode audio in the background |
 | `--ext` | `wav mp3 m4a flac ogg opus` | File extensions to include |
 | `--cache-dir` | Hugging Face cache | Where to store downloaded models |
 
@@ -71,6 +74,9 @@ python transcribe.py ./audio -l ro
 
 # Faster model, separate output file
 python transcribe.py ./audio -l ro -m large-v3-turbo -o transcripts_turbo.csv
+
+# Bigger batches on an 8 GB GPU
+python transcribe.py ./audio -l ro -b 16
 
 # Keep models inside the project folder
 python transcribe.py ./audio -l ro --cache-dir ./models
@@ -87,13 +93,31 @@ A UTF-8 CSV (with BOM, so Excel shows diacritics correctly):
 
 Paths are relative to the input folder.
 
+## How batching works
+
+Whisper reads audio in 30-second windows, so a folder of short clips normally keeps the GPU busy with one small clip at a time. This tool instead:
+
+1. Decodes files and trims leading and trailing silence in background threads, so the GPU never waits on disk.
+2. Joins a group of clips into one signal separated by silence, and marks each clip as its own window using faster-whisper's `clip_timestamps`. Every clip is still transcribed in isolation, never mixed with its neighbors.
+3. Decodes `--batch-size` windows at once on the GPU and maps each result back to its file.
+4. Applies Whisper's usual quality checks. Batched decoding skips Whisper's retry-at-higher-temperature step, so any clip that looks unreliable (low confidence or repetitive output) is transcribed again on its own with the full checks.
+
+Files longer than 30 seconds of speech, and everything on CPU, take the regular one-file-at-a-time path.
+
 ## Performance
 
-Rough expectations for clips of 20 to 30 seconds with `large-v3` on a laptop RTX 4070 (8 GB): around 0.5 to 1 second per clip, so a few thousand clips in about an hour. `large-v3-turbo` is several times faster with slightly lower accuracy. Speed depends heavily on cooling and power mode, so test on a small batch first.
+Rough expectations for clips of 20 to 30 seconds with `large-v3` on a laptop RTX 4070 (8 GB):
+
+| Mode | Per clip | 6000 clips |
+|---|---|---|
+| One at a time (`-b 1`) | 0.5 to 1 s | about 1 to 1.5 hours |
+| Batched (`-b 8` or `-b 16`) | roughly 2 to 3x faster | about 20 to 40 minutes |
+
+These are estimates; speed depends heavily on cooling, power mode and audio length, so test on a small batch first. `large-v3-turbo` is several times faster again, with slightly lower accuracy.
 
 Tips:
 
-- **Always set `--language`.** Auto-detection on short clips can pick the wrong language.
+- **Always set `--language`.** Auto-detection on short clips can pick the wrong language, and in batched mode a whole group shares one detected language.
 - **Compare models on 50 files** before a long run. If `large-v3-turbo` is good enough for your audio, it saves a lot of time.
 - **Laptops:** keep the charger in and use a performance power profile.
 
@@ -103,7 +127,7 @@ Tips:
 The NVIDIA GPU is off or not visible. On laptops with hybrid graphics (e.g. ASUS G-Helper or Armoury Crate), switch the GPU mode from Eco to Standard. In WSL, run `wsl --shutdown` from PowerShell afterwards and reopen the terminal. Do not install an NVIDIA driver inside WSL; it uses the Windows one.
 
 **`CUDA out of memory`**
-Use `--compute-type int8_float16` or a smaller model.
+Lower `--batch-size`, use `--compute-type int8_float16`, or pick a smaller model.
 
 **Errors about `libcublas` or `libcudnn`**
 Reinstall the CUDA wheels inside the virtual environment: `pip install --force-reinstall -r requirements.txt`.
@@ -113,6 +137,15 @@ PyAV 19 is incompatible with faster-whisper 1.2.x. The pinned requirements avoid
 
 **Words missing at the start or end of clips**
 Try `--no-vad`. The voice activity filter prevents hallucinated text on silence, but can occasionally trim quiet speech.
+
+## Development
+
+The tests run the real faster-whisper pipeline with the neural network replaced by a small deterministic stub, so they need no GPU and no model download:
+
+```bash
+pip install pytest
+pytest
+```
 
 ## License
 
