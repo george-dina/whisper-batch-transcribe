@@ -1,0 +1,6 @@
+faster-whisper>=1.1
+# PyAV 19 removed an argument faster-whisper 1.2.x still uses; keep below 19 until fixed upstream
+av>=11,<19
+# CUDA 12 runtime libraries for NVIDIA GPUs (Linux, WSL and Windows; skipped on macOS)
+nvidia-cublas-cu12; sys_platform != "darwin"
+nvidia-cudnn-cu12>=9,<10; sys_platform != "darwin"

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Models and caches
+hf_cache/
+models/
+
+# Data and outputs (never commit recordings or transcripts)
+audio/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.opus
+transcripts*.csv
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
