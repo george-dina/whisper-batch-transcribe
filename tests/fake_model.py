@@ -48,10 +48,12 @@ class StubNetwork:
     device = "cpu"
     device_index = [0]
 
-    def __init__(self, bin_to_word: dict[int, int], bad_bins: set[int], loop_bins: set[int] = frozenset()):
+    def __init__(self, bin_to_word: dict[int, int], bad_bins: set[int], loop_bins: set[int] = frozenset(),
+                 quiet_bins: set[int] = frozenset()):
         self.bin_to_word = bin_to_word
         self.bad_bins = bad_bins
         self.loop_bins = loop_bins
+        self.quiet_bins = quiet_bins
         self.calls: list[int] = []  # batch size of every generate() call
         self.max_lengths: list[int] = []  # max_length passed to every generate() call
 
@@ -70,7 +72,11 @@ class StubNetwork:
             score = -5.0 if (b in self.bad_bins and len(prompts) > 1) else -0.1
             # "loop" clips repeat their word until the length limit, like a hallucinating model
             tokens = [word] * (max_length - len(prompt)) if b in self.loop_bins else [word]
-            results.append(SimpleNamespace(sequences_ids=[tokens], scores=[score], no_speech_prob=0.0))
+            # "quiet" clips look like silence to Whisper's no-speech check: unsure and low confidence
+            no_speech = 0.0
+            if b in self.quiet_bins:
+                score, no_speech = -3.0, 0.9
+            results.append(SimpleNamespace(sequences_ids=[tokens], scores=[score], no_speech_prob=no_speech))
         return results
 
     def detect_language(self, encoder_output):
@@ -82,7 +88,8 @@ def dominant_bin(feats: np.ndarray) -> int:
 
 
 def make_model(
-    freqs: list[float], bad_freqs: set[float] = frozenset(), loop_freqs: set[float] = frozenset()
+    freqs: list[float], bad_freqs: set[float] = frozenset(), loop_freqs: set[float] = frozenset(),
+    quiet_freqs: set[float] = frozenset(),
 ) -> tuple[WhisperModel, dict[float, str]]:
     """Return a stub model plus the word each tone frequency will be transcribed as."""
     fe = FeatureExtractor()
@@ -92,7 +99,8 @@ def make_model(
 
     m = WhisperModel.__new__(WhisperModel)
     m.logger = get_logger()
-    m.model = StubNetwork(bin_to_word, {bins[f] for f in bad_freqs}, {bins[f] for f in loop_freqs})
+    m.model = StubNetwork(bin_to_word, {bins[f] for f in bad_freqs}, {bins[f] for f in loop_freqs},
+                          {bins[f] for f in quiet_freqs})
     m.hf_tokenizer = build_tokenizer()
     m.feat_kwargs = {}
     m.feature_extractor = fe

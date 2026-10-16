@@ -110,6 +110,7 @@ python repass.py ./audio -c transcripts.csv -l ro
 
 - A file counts as suspicious below `--min-cps` characters per second (default `6`; normal conversation is usually 10 to 15). The dry run prints the distribution for your data, so you can pick a threshold that fits.
 - The new transcript replaces the old one only if it is longer after repetition loops are removed, so the second pass can't make a row worse by that measure.
+- If transcripts are still too short, run it again with `--no-skip --fresh`. `--no-skip` stops Whisper from skipping 30-second windows it judges to be silence, which recovers more speech but can add filler text (such as "Mulțumesc") where there really is silence. `--fresh` retries files the earlier second pass already handled; a result is still only kept if it is longer.
 - The original CSV is saved as `transcripts_before_repass.csv`, and every result goes to `transcripts_repass_log.csv` as it is produced. If the run is interrupted, run the same command again and it continues.
 
 ## How batching works

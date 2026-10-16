@@ -41,6 +41,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--compute-type", default=None, help="CTranslate2 compute type (default: float16 on GPU, int8 on CPU)")
     p.add_argument("--beam-size", type=int, default=5, help="beam size (default: 5)")
     p.add_argument("--vad", action="store_true", help="keep the silence filter on (default: off, so quiet speech is not cut)")
+    p.add_argument(
+        "--no-skip",
+        action="store_true",
+        help="never skip a window as 'no speech'; recovers missed speech, but may add filler text on real silence",
+    )
+    p.add_argument("--fresh", action="store_true", help="ignore earlier second-pass results and try every candidate again")
     p.add_argument("--cache-dir", type=Path, default=None, help="where to store downloaded models (default: Hugging Face cache)")
     return p.parse_args(argv)
 
@@ -101,6 +107,7 @@ def thorough_transcript(model, clip: tx.Clip, args) -> str:
         beam_size=args.beam_size,
         vad_filter=args.vad,
         condition_on_previous_text=False,
+        **({"no_speech_threshold": None} if args.no_skip else {}),
     )
     # Drop repetition loops so they can't win the "longer is better" comparison
     kept = [s for s in segments if s.text.strip() and get_compression_ratio(s.text.strip()) <= COMPRESSION_RATIO_THRESHOLD]
@@ -125,7 +132,7 @@ def run(args, model) -> int:
         return 0
 
     log_path = args.csv.with_name(args.csv.stem + "_repass_log.csv")
-    log = load_log(log_path)
+    log = {} if args.fresh else load_log(log_path)
     todo = [r for r in candidates if r["file"] not in log]
     if log:
         print(f"{len(candidates) - len(todo)} already re-transcribed in an earlier run, {len(todo)} to go.")
@@ -161,7 +168,7 @@ def run(args, model) -> int:
                 progress.update(1, f"{row['file']}: {len(old)} -> {len(new)} chars")
 
     # Apply the improvements to the main CSV, keeping row order
-    improved = {f: e["text"] for f, e in log.items() if str(e["replaced"]) == "1"}
+    improved = {f: e["text"] for f, e in load_log(log_path).items() if str(e["replaced"]) == "1"}
     changed = 0
     for row in rows:
         if row["file"] in improved and row["text"] != improved[row["file"]]:
@@ -174,7 +181,7 @@ def run(args, model) -> int:
             print(f"Original saved as {backup}.")
         write_rows_atomic(args.csv, rows, tx.FIELDS)
 
-    total_replaced = len(improved)
+    total_replaced = sum(1 for e in log.values() if str(e["replaced"]) == "1")
     print(f"Done. {total_replaced} of {len(log)} re-transcribed files got a longer transcript"
           f" ({changed} updated in {args.csv.name} now), {failed} failed.")
     print(f"Per-file details: {log_path}")

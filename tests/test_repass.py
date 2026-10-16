@@ -41,8 +41,8 @@ def setup(tmp_path):
     return freqs, audio, csv_path, rows
 
 
-def run(audio, csv_path, freqs, *extra, loop=frozenset()):
-    model, words = make_model(freqs, loop_freqs=loop)
+def run(audio, csv_path, freqs, *extra, loop=frozenset(), quiet=frozenset()):
+    model, words = make_model(freqs, loop_freqs=loop, quiet_freqs=quiet)
     args = repass.parse_args([str(audio), "-c", str(csv_path), "-l", "ro", "--min-cps", "6", *extra])
     return repass.run(args, model), words, model.model
 
@@ -97,6 +97,20 @@ def test_repetition_loops_never_win(tmp_path):
     out = read(csv_path)
     assert out[3]["text"] == "ab", "a looping transcript must not replace the old text"
     assert out[1]["text"] != ""
+
+
+def test_no_skip_recovers_windows_whisper_thought_were_silent(tmp_path):
+    freqs, audio, csv_path, rows = setup(tmp_path)
+    quiet = {freqs[1]}
+
+    run(audio, csv_path, freqs, quiet=quiet)
+    assert read(csv_path)[1]["text"] == "", "by default the quiet window is skipped"
+
+    _, words, stub = run(audio, csv_path, freqs, "--no-skip", "--fresh", quiet=quiet)
+    out = read(csv_path)
+    assert out[1]["text"] == words[freqs[1]]
+    assert out[3]["text"] == words[freqs[3]], "earlier improvements must be kept"
+    assert read(tmp_path / "t_before_repass.csv") == rows, "the backup must stay the original"
 
 
 def test_short_files_are_ignored(tmp_path):
