@@ -96,6 +96,22 @@ A UTF-8 CSV (with BOM, so Excel shows diacritics correctly):
 
 Paths are relative to the input folder.
 
+## Second pass for short transcripts
+
+Sometimes a transcript is much shorter than its recording should produce: a quiet speaker cut out by the silence filter, or Whisper skipping a stretch it was unsure about. `repass.py` finds those files by comparing transcript length to duration and re-transcribes only them, with the most thorough settings (full audio with no silence filter, one window at a time, no text carried between windows).
+
+```bash
+# 1. See how many files look too short, without transcribing anything
+python repass.py ./audio -c transcripts.csv -l ro --dry-run
+
+# 2. Re-transcribe them
+python repass.py ./audio -c transcripts.csv -l ro
+```
+
+- A file counts as suspicious below `--min-cps` characters per second (default `6`; normal conversation is usually 10 to 15). The dry run prints the distribution for your data, so you can pick a threshold that fits.
+- The new transcript replaces the old one only if it is longer after repetition loops are removed, so the second pass can't make a row worse by that measure.
+- The original CSV is saved as `transcripts_before_repass.csv`, and every result goes to `transcripts_repass_log.csv` as it is produced. If the run is interrupted, run the same command again and it continues.
+
 ## How batching works
 
 Whisper reads audio in 30-second windows, so a folder of short clips normally keeps the GPU busy with one small clip at a time. This tool instead:
