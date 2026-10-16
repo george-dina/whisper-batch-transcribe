@@ -5,8 +5,9 @@ Writes one CSV row per file (file, duration_s, text). Safe to stop and
 restart: files already in the output CSV are skipped.
 
 Short clips (30 s or less after trimming silence) are transcribed several at
-a time on the GPU. Longer files, and any clip whose batched result looks
-unreliable, go through the regular one-file-at-a-time path instead.
+a time on the GPU. Longer files are split into 30 s windows that are decoded
+in parallel. Any short clip whose batched result looks unreliable is
+transcribed again on its own with Whisper's full quality checks.
 """
 
 from __future__ import annotations
@@ -293,6 +294,29 @@ def transcribe_group(pipe, clips: list[Clip], args) -> None:
         clips[max(idx, 0)].segments.append(seg)
 
 
+def transcribe_long_batched(pipe, clip: Clip, args) -> str:
+    """Transcribe one long file by decoding its 30 s windows in parallel."""
+    kwargs = {}
+    if args.no_vad:
+        # Without VAD the pipeline needs explicit windows: plain 30 s slices
+        step = MAX_BATCHED_CLIP_S
+        kwargs["clip_timestamps"] = [
+            {"start": t, "end": min(t + step, clip.duration)}
+            for t in (i * step for i in range(int(clip.duration // step) + 1))
+            if clip.duration - t > 0.1
+        ]
+    else:
+        kwargs["vad_filter"] = True
+    segments, _ = pipe.transcribe(
+        clip.audio,
+        language=args.language,
+        beam_size=args.beam_size,
+        batch_size=args.batch_size,
+        **kwargs,
+    )
+    return segments_text(segments)
+
+
 # --------------------------------------------------------------------------- #
 # Progress
 # --------------------------------------------------------------------------- #
@@ -352,6 +376,13 @@ def run(args, model, pipe=None) -> int:
             stats["failed"] += 1
             print(f"FAILED {clip.rel}: {reason}", file=sys.stderr, flush=True)
 
+        def long_batched(clip: Clip) -> None:
+            try:
+                write(clip, transcribe_long_batched(pipe, clip, args))
+            except Exception as exc:
+                print(f"Batched decoding failed for {clip.rel} ({exc}); retrying one window at a time.", file=sys.stderr, flush=True)
+                single(clip)
+
         def single(clip: Clip) -> None:
             try:
                 write(clip, transcribe_single(model, clip, args, stats))
@@ -397,7 +428,7 @@ def run(args, model, pipe=None) -> int:
                 fh.flush()
                 progress.update(1)
             elif not batched or clip.span_seconds > MAX_BATCHED_CLIP_S:
-                single(clip)
+                long_batched(clip) if batched else single(clip)
                 fh.flush()
                 clip.audio = None
                 progress.update(1)

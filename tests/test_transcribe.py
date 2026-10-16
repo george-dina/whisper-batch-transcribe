@@ -78,7 +78,7 @@ def test_batched_matches_sequential(tmp_path):
     assert read_csv(tmp_path / "batched.csv") == read_csv(tmp_path / "sequential.csv")
 
 
-def test_long_files_and_unreliable_clips_use_the_single_path(tmp_path, capsys):
+def test_long_files_and_unreliable_clips(tmp_path, capsys):
     freqs = FREQS[:6]
     seconds = [5, 45, 5, 5, 12, 3]  # one file longer than Whisper's 30 s window
     audio = tmp_path / "audio"
@@ -109,6 +109,23 @@ def test_silence_broken_files_and_resume(tmp_path, capsys):
     assert calls == []
     assert "2 already done, 1 to go" in capsys.readouterr().out
     assert len(read_csv(tmp_path / "out.csv")) == 2
+
+
+def test_long_files_are_decoded_in_parallel_windows(tmp_path):
+    freqs = FREQS[:3]
+    seconds = [75, 5, 8]  # 75 s = three 30 s windows
+    audio = tmp_path / "audio"
+    mapping = make_dataset(audio, freqs, seconds)
+
+    failed, words, calls = run(tmp_path, audio, "out.csv", 4, freqs)
+
+    assert failed == 0
+    assert 3 in calls, "the long file's three windows should be decoded together"
+    result = read_csv(tmp_path / "out.csv")
+    for rel, f in mapping.items():
+        assert set(result[rel].split()) == {words[f]}
+    long_rel = next(rel for rel, f in mapping.items() if f == freqs[0])
+    assert len(result[long_rel].split()) == 3
 
 
 @pytest.mark.parametrize("batch_size", [1, 4])

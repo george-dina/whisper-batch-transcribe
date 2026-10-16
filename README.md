@@ -2,7 +2,7 @@
 
 Transcribe thousands of audio files on your own GPU with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), into a single CSV.
 
-Built for large folders of short recordings (thousands of clips under 30 seconds each), but works with files of any length and any language Whisper supports.
+Built for large folders of recordings, from thousands of short clips to long phone calls, in any language Whisper supports.
 
 ## Features
 
@@ -105,7 +105,7 @@ Whisper reads audio in 30-second windows, so a folder of short clips normally ke
 3. Decodes `--batch-size` windows at once on the GPU and maps each result back to its file.
 4. Applies Whisper's usual quality checks. Batched decoding skips Whisper's retry-at-higher-temperature step, so any clip that looks unreliable (low confidence or repetitive output) is transcribed again on its own with the full checks.
 
-Files longer than 30 seconds of speech, and everything on CPU, take the regular one-file-at-a-time path.
+Files longer than 30 seconds are handled differently: each one is split into 30-second windows (at pauses, using the voice activity filter), and the windows are decoded `--batch-size` at a time. On CPU, everything takes the regular one-file-at-a-time path.
 
 ## Performance
 
