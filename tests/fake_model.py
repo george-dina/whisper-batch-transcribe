@@ -48,23 +48,29 @@ class StubNetwork:
     device = "cpu"
     device_index = [0]
 
-    def __init__(self, bin_to_word: dict[int, int], bad_bins: set[int]):
+    def __init__(self, bin_to_word: dict[int, int], bad_bins: set[int], loop_bins: set[int] = frozenset()):
         self.bin_to_word = bin_to_word
         self.bad_bins = bad_bins
+        self.loop_bins = loop_bins
         self.calls: list[int] = []  # batch size of every generate() call
+        self.max_lengths: list[int] = []  # max_length passed to every generate() call
 
     def encode(self, features, to_cpu=False):
         return np.array(features)
 
     def generate(self, encoder_output, prompts, **kwargs):
         self.calls.append(len(prompts))
+        max_length = kwargs.get("max_length", 448)
+        self.max_lengths.append(max_length)
         results = []
-        for feats in encoder_output:
+        for prompt, feats in zip(prompts, encoder_output):
             b = dominant_bin(feats)
             word = self.bin_to_word.get(b, 0)
             # "bad" clips decode with low confidence, but only when batched
             score = -5.0 if (b in self.bad_bins and len(prompts) > 1) else -0.1
-            results.append(SimpleNamespace(sequences_ids=[[word]], scores=[score], no_speech_prob=0.0))
+            # "loop" clips repeat their word until the length limit, like a hallucinating model
+            tokens = [word] * (max_length - len(prompt)) if b in self.loop_bins else [word]
+            results.append(SimpleNamespace(sequences_ids=[tokens], scores=[score], no_speech_prob=0.0))
         return results
 
     def detect_language(self, encoder_output):
@@ -75,7 +81,9 @@ def dominant_bin(feats: np.ndarray) -> int:
     return int(np.argmax(np.asarray(feats)[:, :50].mean(axis=1)))
 
 
-def make_model(freqs: list[float], bad_freqs: set[float] = frozenset()) -> tuple[WhisperModel, dict[float, str]]:
+def make_model(
+    freqs: list[float], bad_freqs: set[float] = frozenset(), loop_freqs: set[float] = frozenset()
+) -> tuple[WhisperModel, dict[float, str]]:
     """Return a stub model plus the word each tone frequency will be transcribed as."""
     fe = FeatureExtractor()
     bins = {f: dominant_bin(fe(tone(f, 2.0))) for f in freqs}
@@ -84,7 +92,7 @@ def make_model(freqs: list[float], bad_freqs: set[float] = frozenset()) -> tuple
 
     m = WhisperModel.__new__(WhisperModel)
     m.logger = get_logger()
-    m.model = StubNetwork(bin_to_word, {bins[f] for f in bad_freqs})
+    m.model = StubNetwork(bin_to_word, {bins[f] for f in bad_freqs}, {bins[f] for f in loop_freqs})
     m.hf_tokenizer = build_tokenizer()
     m.feat_kwargs = {}
     m.feature_extractor = fe

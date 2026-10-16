@@ -10,6 +10,7 @@ Built for large folders of short recordings (thousands of clips under 30 seconds
 - **Batched GPU decoding:** short clips are transcribed several at a time, which is much faster for datasets of many small files.
 - **Resumable:** stop it any time (Ctrl+C, reboot, crash) and run it again; finished files are skipped.
 - **Fault tolerant:** a broken file is reported and skipped, not fatal.
+- **Loop protection:** transcripts that run far longer than the clip could contain (Whisper repeating itself) are cut short, so one bad clip can't stall the run.
 - **Local and private:** audio never leaves your machine, and there are no API costs.
 - **Zero CUDA setup:** the CUDA libraries come from pip, so you only need an NVIDIA driver.
 - **Live progress with ETA.**
@@ -63,6 +64,8 @@ python transcribe.py INPUT [options]
 | `--beam-size` | `5` | `1` is faster, `5` is more accurate |
 | `--no-vad` | off | Disable the voice activity filter |
 | `--workers` | `4` | Threads that decode audio in the background |
+| `--max-tokens-per-second` | `12` | Length cap for clips up to 30 s, which stops repetition loops early. `0` disables it |
+| `--no-fallback` | off | Decode each clip once instead of retrying at higher temperatures. Faster, slightly less robust |
 | `--ext` | `wav mp3 m4a flac ogg opus` | File extensions to include |
 | `--cache-dir` | Hugging Face cache | Where to store downloaded models |
 
@@ -134,6 +137,9 @@ Reinstall the CUDA wheels inside the virtual environment: `pip install --force-r
 
 **Every file fails with `unexpected keyword argument 'metadata_errors'`**
 PyAV 19 is incompatible with faster-whisper 1.2.x. The pinned requirements avoid it; if you installed packages by hand, run `pip install "av<19"`.
+
+**Much slower than expected while the GPU is busy**
+Whisper is probably looping on some clips: it repeats a phrase until its length limit, then retries up to five more times at higher temperatures. The length cap (on by default) bounds that work. For more speed, add `--no-fallback`, or switch to `-m large-v3-turbo`, whose decoder is much lighter.
 
 **Words missing at the start or end of clips**
 Try `--no-vad`. The voice activity filter prevents hallucinated text on silence, but can occasionally trim quiet speech.

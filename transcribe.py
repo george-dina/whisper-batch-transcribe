@@ -31,6 +31,9 @@ SAMPLE_RATE = 16000
 MAX_BATCHED_CLIP_S = 30.0  # Whisper's context window
 GAP_S = 1.0  # silence placed between clips when they are grouped
 
+MAX_TOKENS = 440  # Whisper allows 448 tokens per window, including the prompt
+TOKEN_HEADROOM = 32  # extra tokens allowed on top of the per-second budget
+
 # Whisper's own quality thresholds, applied to batched results
 NO_SPEECH_THRESHOLD = 0.6
 LOG_PROB_THRESHOLD = -1.0
@@ -104,6 +107,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--beam-size", type=int, default=5, help="beam size: 1 is faster, 5 is more accurate (default: 5)")
     p.add_argument("--no-vad", action="store_true", help="disable the voice activity filter")
+    p.add_argument(
+        "--max-tokens-per-second",
+        type=float,
+        default=12.0,
+        help="cap on transcript length for clips up to 30 s, which stops repetition loops early; 0 disables (default: 12)",
+    )
+    p.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="decode each clip once, skipping Whisper's retries at higher temperature (faster, slightly less robust)",
+    )
     p.add_argument("--workers", type=int, default=4, help="threads that decode audio in the background (default: 4)")
     p.add_argument("--ext", nargs="+", default=list(DEFAULT_EXTENSIONS), help="file extensions to include (default: wav mp3 m4a flac ogg opus)")
     p.add_argument("--cache-dir", type=Path, default=None, help="where to store downloaded models (default: Hugging Face cache)")
@@ -208,13 +222,37 @@ def is_unreliable(seg) -> bool:
     return seg.compression_ratio > COMPRESSION_RATIO_THRESHOLD or seg.avg_logprob < LOG_PROB_THRESHOLD
 
 
-def transcribe_single(model, clip: Clip, args) -> str:
+def token_cap(seconds: float, args) -> int | None:
+    """Most tokens a clip of this length may produce, or None for no cap.
+
+    Normal speech needs well under 10 tokens per second, so a transcript that
+    runs past the budget is almost always the model repeating itself. Files
+    longer than one window are left alone, since their prompt carries earlier
+    text and the budget would not apply cleanly.
+    """
+    if args.max_tokens_per_second <= 0 or seconds > MAX_BATCHED_CLIP_S:
+        return None
+    return min(MAX_TOKENS, int(args.max_tokens_per_second * seconds) + TOKEN_HEADROOM)
+
+
+def hit_cap(segments: list, cap: int | None) -> bool:
+    return cap is not None and sum(len(s.tokens) for s in segments) >= cap - 2
+
+
+def transcribe_single(model, clip: Clip, args, stats: dict | None = None) -> str:
+    cap = token_cap(clip.span_seconds or clip.duration, args)
+    kwargs = {"temperature": 0.0} if args.no_fallback else {}
     segments, _ = model.transcribe(
         clip.audio,
         language=args.language,
         beam_size=args.beam_size,
         vad_filter=not args.no_vad,
+        max_new_tokens=cap,
+        **kwargs,
     )
+    segments = list(segments)
+    if stats is not None and hit_cap(segments, cap):
+        stats["capped"] += 1
     return segments_text(segments)
 
 
@@ -246,6 +284,7 @@ def transcribe_group(pipe, clips: list[Clip], args) -> None:
         batch_size=args.batch_size,
         clip_timestamps=stamps,
         without_timestamps=True,
+        max_new_tokens=token_cap(max(c.span_seconds for c in clips), args),
     )
     for clip in clips:
         clip.segments = []
@@ -295,7 +334,7 @@ def run(args, model, pipe=None) -> int:
 
     batched = pipe is not None and args.batch_size > 1
     group_size = args.batch_size * 4 if batched else 1
-    stats = {"failed": 0, "retried": 0, "silent": 0}
+    stats = {"failed": 0, "retried": 0, "silent": 0, "capped": 0}
     progress = Progress(len(todo))
 
     new_file = not args.output.exists() or args.output.stat().st_size == 0
@@ -315,7 +354,7 @@ def run(args, model, pipe=None) -> int:
 
         def single(clip: Clip) -> None:
             try:
-                write(clip, transcribe_single(model, clip, args))
+                write(clip, transcribe_single(model, clip, args, stats))
             except Exception as exc:
                 fail(clip, str(exc))
 
@@ -331,7 +370,7 @@ def run(args, model, pipe=None) -> int:
                     if not clip.segments or all(is_no_speech(s) for s in clip.segments):
                         stats["silent"] += 1
                         write(clip, "")
-                    elif any(is_unreliable(s) for s in clip.segments):
+                    elif not args.no_fallback and any(is_unreliable(s) for s in clip.segments):
                         stats["retried"] += 1
                         single(clip)
                     else:
@@ -376,6 +415,8 @@ def run(args, model, pipe=None) -> int:
         f"Done in {fmt_time(total)}. {ok} transcribed "
         f"({stats['silent']} without speech, {stats['retried']} re-checked one by one), {stats['failed']} failed."
     )
+    if stats["capped"]:
+        print(f"{stats['capped']} transcripts were cut short because they looked like repetition loops.")
     if stats["failed"]:
         print("Run the same command again to retry the failed files.")
     return stats["failed"]
