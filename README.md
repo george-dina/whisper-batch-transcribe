@@ -113,6 +113,20 @@ python repass.py ./audio -c transcripts.csv -l ro
 - If transcripts are still too short, run it again with `--no-skip --fresh`. `--no-skip` stops Whisper from skipping 30-second windows it judges to be silence, which recovers more speech but can add filler text (such as "Mulțumesc") where there really is silence. `--fresh` retries files the earlier second pass already handled; a result is still only kept if it is longer.
 - The original CSV is saved as `transcripts_before_repass.csv`, and every result goes to `transcripts_repass_log.csv` as it is produced. If the run is interrupted, run the same command again and it continues.
 
+### Removing phrases Whisper invents
+
+On silence or unclear audio, Whisper sometimes writes stock phrases from the YouTube videos and subtitles it was trained on, such as "Nu uitați să dați like", "Mulțumesc pentru vizionare" or "Subtitrarea realizată de comunitatea Amara.org". `--hallucinations` finds every transcript containing one of these, transcribes those files again, removes the invented sentences from both the old and the new version, and keeps the longer cleaned one:
+
+```bash
+# See how many files are affected, with a short excerpt of each
+python repass.py ./audio -c transcripts.csv -l ro --hallucinations --dry-run
+
+# Clean them
+python repass.py ./audio -c transcripts.csv -l ro --hallucinations
+```
+
+The built-in list (in `repass.py`) only contains phrases specific to videos and subtitles; a plain "Mulțumesc" is never touched. To target your own phrase, use `--match` with a regular expression, for example `--match 'dați like'`. Check the excerpts from the dry run first, in case a phrase also occurs legitimately in your recordings.
+
 ## How batching works
 
 Whisper reads audio in 30-second windows, so a folder of short clips normally keeps the GPU busy with one small clip at a time. This tool instead:

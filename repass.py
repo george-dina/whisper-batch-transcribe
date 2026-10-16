@@ -8,8 +8,16 @@ not dropped), one 30 s window at a time, without carrying text from one
 window to the next (which can make Whisper skip whole stretches).
 
 A new transcript replaces the old one only if it is longer once repetition
-loops are removed. Results are logged as they come in, so an interrupted run
-resumes where it stopped. The original CSV is backed up before it is updated.
+loops are removed.
+
+With --match, rows are picked by a text pattern instead, for example a phrase
+Whisper invents over unclear audio ("Nu uitați să dați like"). Sentences that
+match are removed from both the old and the new transcript, and the longer of
+the two cleaned versions is kept, so the invented phrase disappears either way.
+
+Each change is written to the CSV as soon as a file is done and logged, so an
+interrupted run resumes where it stopped. The original CSV is backed up before
+the first change.
 """
 
 from __future__ import annotations
@@ -17,6 +25,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
 import statistics
 import sys
 import time
@@ -25,6 +34,22 @@ from pathlib import Path
 import transcribe as tx
 
 COMPRESSION_RATIO_THRESHOLD = 2.4  # Whisper's own repetition threshold
+
+# Phrases Whisper is known to invent over silence or unclear audio: leftovers
+# from the YouTube videos and subtitle files it was trained on. Each is
+# specific to video or subtitle content, so it should not occur in a normal
+# phone call. Plain "mulțumesc" is deliberately not on the list.
+HALLUCINATIONS = {
+    "like": r"\blike\b",
+    "subscribe / abonare": r"\bsubscribe\b|\babona(?:ți|ti)[- ]v[ăa]\b|\babonea(?:z[ăa]|za)[- ]te\b|s[ăa] v[ăa] abona(?:ți|ti)",
+    "pentru vizionare": r"pentru vizionare",
+    "clopoțel / notificări": r"clopo[țţt]el|activa(?:ți|ti) notific[ăa]ril",
+    "comentariu în secțiune": r"l[ăa]sa(?:ți|ti) un comentariu|sec(?:ț|ţ|t)iunea de comentarii",
+    "canalul meu / nostru": r"canalul (?:meu|nostru)",
+    "subtitrare": r"subtitr|subtitl",
+    "amara.org": r"amara\.org",
+    "thanks for watching": r"thanks? (?:you )?for watching",
+}
 LOG_FIELDS = ("file", "old_chars", "new_chars", "replaced", "text")
 
 
@@ -47,6 +72,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="never skip a window as 'no speech'; recovers missed speech, but may add filler text on real silence",
     )
     p.add_argument("--fresh", action="store_true", help="ignore earlier second-pass results and try every candidate again")
+    p.add_argument(
+        "--hallucinations",
+        action="store_true",
+        help="pick rows containing any of Whisper's known invented phrases (like, subscribe, "
+        "'pentru vizionare', subtitle credits, ...) and remove those sentences",
+    )
+    p.add_argument(
+        "--match",
+        metavar="REGEX",
+        default=None,
+        help="pick rows whose text matches this pattern (case-insensitive) instead of short rows, "
+        "and remove the matching sentences, e.g. --match '\\blike\\b'",
+    )
     p.add_argument("--cache-dir", type=Path, default=None, help="where to store downloaded models (default: Hugging Face cache)")
     return p.parse_args(argv)
 
@@ -81,6 +119,52 @@ def find_candidates(rows: list[dict], min_cps: float, min_duration: float) -> li
         r for r in rows
         if float(r.get("duration_s") or 0) >= min_duration and chars_per_second(r) < min_cps
     ]
+
+
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
+
+
+def compile_pattern(pattern: str) -> re.Pattern:
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def find_matches(rows: list[dict], pattern: re.Pattern) -> list[dict]:
+    return [r for r in rows if pattern.search(r["text"])]
+
+
+def remove_matching_sentences(text: str, pattern: re.Pattern) -> str:
+    return " ".join(s for s in SENTENCE_SPLIT.split(text.strip()) if s and not pattern.search(s)).strip()
+
+
+def snippet(text: str, pattern: re.Pattern, width: int = 60) -> str:
+    m = pattern.search(text)
+    if not m:
+        return ""
+    return text[max(0, m.start() - width): m.end() + width].replace("\n", " ")
+
+
+def build_pattern(args) -> re.Pattern | None:
+    parts = []
+    if args.hallucinations:
+        parts += list(HALLUCINATIONS.values())
+    if args.match:
+        parts.append(args.match)
+    return compile_pattern("|".join(f"(?:{p})" for p in parts)) if parts else None
+
+
+def summarize_matches(rows: list[dict], candidates: list[dict], pattern: re.Pattern, args=None) -> None:
+    hours = sum(float(r.get("duration_s") or 0) for r in candidates) / 3600
+    label = "known Whisper phrases" if args is not None and args.hallucinations and not args.match else f"/{pattern.pattern}/"
+    print(f"{len(candidates)} of {len(rows)} files match {label} ({hours:.1f} hours of audio).")
+    if args is not None and args.hallucinations:
+        for name, rx in HALLUCINATIONS.items():
+            n = sum(1 for r in candidates if compile_pattern(rx).search(r["text"]))
+            if n:
+                print(f"  {name}: {n} files")
+    for r in candidates[:5]:
+        print(f"  {r['file']}: ...{snippet(r['text'], pattern)}...")
+    if len(candidates) > 5:
+        print(f"  ... and {len(candidates) - 5} more")
 
 
 def summarize(rows: list[dict], candidates: list[dict], args) -> None:
@@ -120,24 +204,32 @@ def load_log(path: Path) -> dict[str, dict]:
 
 def run(args, model) -> int:
     rows = read_rows(args.csv)
-    candidates = find_candidates(rows, args.min_cps, args.min_duration)
-    summarize(rows, candidates, args)
+    pattern = build_pattern(args)
+    if pattern:
+        candidates = find_matches(rows, pattern)
+        summarize_matches(rows, candidates, pattern, args)
+    else:
+        candidates = find_candidates(rows, args.min_cps, args.min_duration)
+        summarize(rows, candidates, args)
 
     if args.dry_run:
         out = args.csv.with_name(args.csv.stem + "_repass_candidates.csv")
         listing = [{"file": r["file"], "duration_s": r["duration_s"], "chars": len(r["text"]),
-                    "chars_per_s": f"{chars_per_second(r):.2f}"} for r in candidates]
-        write_rows_atomic(out, listing, ("file", "duration_s", "chars", "chars_per_s"))
+                    "chars_per_s": f"{chars_per_second(r):.2f}",
+                    "snippet": snippet(r["text"], pattern) if pattern else ""} for r in candidates]
+        write_rows_atomic(out, listing, ("file", "duration_s", "chars", "chars_per_s", "snippet"))
         print(f"Candidate list written to {out}. Nothing was transcribed.")
         return 0
 
-    log_path = args.csv.with_name(args.csv.stem + "_repass_log.csv")
+    suffix = "_repass_match_log.csv" if pattern else "_repass_log.csv"
+    log_path = args.csv.with_name(args.csv.stem + suffix)
     log = {} if args.fresh else load_log(log_path)
     todo = [r for r in candidates if r["file"] not in log]
-    if log:
+    if len(todo) < len(candidates):
         print(f"{len(candidates) - len(todo)} already re-transcribed in an earlier run, {len(todo)} to go.")
 
-    failed = 0
+    backup = args.csv.with_name(args.csv.stem + "_before_repass.csv")
+    failed = replaced = recovered = 0
     if todo:
         new_log = not log_path.exists()
         progress = tx.Progress(len(todo))
@@ -147,43 +239,46 @@ def run(args, model) -> int:
                 writer.writeheader()
             for row in todo:
                 clip = tx.load_clip(args.input / row["file"], args.input, use_vad=False)
-                if clip.error:
-                    failed += 1
-                    print(f"FAILED {row['file']}: {clip.error}", file=sys.stderr, flush=True)
-                    progress.update(1)
-                    continue
                 try:
+                    if clip.error:
+                        raise RuntimeError(clip.error)
                     new = thorough_transcript(model, clip, args)
                 except Exception as exc:
                     failed += 1
                     print(f"FAILED {row['file']}: {exc}", file=sys.stderr, flush=True)
                     progress.update(1)
                     continue
+
                 old = row["text"]
-                entry = {"file": row["file"], "old_chars": len(old), "new_chars": len(new),
-                         "replaced": int(len(new) > len(old)), "text": new}
-                writer.writerow(entry)
+                if pattern:
+                    old_clean = remove_matching_sentences(old, pattern)
+                    new_clean = remove_matching_sentences(new, pattern)
+                    use_new = len(new_clean) > len(old_clean)
+                    chosen = new_clean if use_new else old_clean
+                    recovered += use_new
+                else:
+                    chosen = new if len(new) > len(old) else old
+                changed = chosen != old
+
+                # Update the CSV first, then the log: a crash in between only means redoing one file
+                if changed:
+                    if not backup.exists():
+                        backup.write_bytes(args.csv.read_bytes())
+                        print(f"Original saved as {backup}.", flush=True)
+                    row["text"] = chosen
+                    write_rows_atomic(args.csv, rows, tx.FIELDS)
+                    replaced += 1
+                writer.writerow({"file": row["file"], "old_chars": len(old), "new_chars": len(chosen),
+                                 "replaced": int(changed), "text": chosen})
                 fh.flush()
-                log[row["file"]] = entry
-                progress.update(1, f"{row['file']}: {len(old)} -> {len(new)} chars")
+                progress.update(1, f"{row['file']}: {len(old)} -> {len(chosen)} chars")
 
-    # Apply the improvements to the main CSV, keeping row order
-    improved = {f: e["text"] for f, e in load_log(log_path).items() if str(e["replaced"]) == "1"}
-    changed = 0
-    for row in rows:
-        if row["file"] in improved and row["text"] != improved[row["file"]]:
-            row["text"] = improved[row["file"]]
-            changed += 1
-    if changed:
-        backup = args.csv.with_name(args.csv.stem + "_before_repass.csv")
-        if not backup.exists():
-            backup.write_bytes(args.csv.read_bytes())
-            print(f"Original saved as {backup}.")
-        write_rows_atomic(args.csv, rows, tx.FIELDS)
-
-    total_replaced = sum(1 for e in log.values() if str(e["replaced"]) == "1")
-    print(f"Done. {total_replaced} of {len(log)} re-transcribed files got a longer transcript"
-          f" ({changed} updated in {args.csv.name} now), {failed} failed.")
+    done = len(todo) - failed
+    if pattern:
+        print(f"Done. {replaced} of {done} files cleaned: {recovered} with a fresh transcript, "
+              f"{replaced - recovered} by removing the matching sentences. {failed} failed.")
+    else:
+        print(f"Done. {replaced} of {done} re-transcribed files got a longer transcript, {failed} failed.")
     print(f"Per-file details: {log_path}")
     return failed
 
